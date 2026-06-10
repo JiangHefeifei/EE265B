@@ -130,7 +130,7 @@ Summary:
 | --- | ---: | ---: | ---: | --- |
 | Symbolic grounded subgoal + QwenVL | 20 | 17 | 3 | `2`, `3`, `12` |
 | Symbolic grounded subgoal + oracle | 10 | 9 | 1 | `2` |
-| Perceptual frame-sampling modulation | 10 | 7 | 3 | `0`, `3`, `6` |
+| Perceptual frame-sampling modulation | 20 | 15 | 5 | `0`, `3`, `6`, `11`, `12` |
 
 This result established the target failure cases for the dual-memory work:
 episodes `2`, `3`, and `12`.
@@ -142,7 +142,7 @@ separate no-memory policy baseline has not been run yet in this workspace.
 
 | Baseline | Memory Type | Subgoal Source | Episodes | Success Rate | Failed Episodes |
 | --- | --- | --- | ---: | ---: | --- |
-| Perceptual-only | Perceptual frame-sampling memory | task prompt only | 10 | 70.0% | `0`, `3`, `6` |
+| Perceptual-only | Perceptual frame-sampling memory | task prompt only | 20 | 75.0% | `0`, `3`, `6`, `11`, `12` |
 | Symbolic-only oracle | Symbolic grounded subgoal memory | simulator oracle | 10 | 90.0% | `2` |
 | Symbolic-only QwenVL | Symbolic grounded subgoal memory | Qwen3-VL | 20 | 85.0% | `2`, `3`, `12` |
 
@@ -150,6 +150,35 @@ These baselines show two useful trends. First, symbolic memory is stronger than
 perceptual-only memory on the sampled PickXtimes episodes. Second, replacing the
 oracle symbolic memory with QwenVL introduces stale or incorrect subgoal errors,
 which motivates the dual-memory correction design.
+
+The 20-episode perceptual-only result was:
+
+```json
+{
+  "PickXtimes": {
+    "0": false,
+    "1": true,
+    "2": true,
+    "3": false,
+    "4": true,
+    "5": true,
+    "6": false,
+    "7": true,
+    "8": true,
+    "9": true,
+    "10": true,
+    "11": false,
+    "12": false,
+    "13": true,
+    "14": true,
+    "15": true,
+    "16": true,
+    "17": true,
+    "18": true,
+    "19": true
+  }
+}
+```
 
 ### Dual-Memory Failure-Case Tests
 
