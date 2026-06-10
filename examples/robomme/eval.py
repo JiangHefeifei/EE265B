@@ -35,6 +35,7 @@ class Args:
 
     obs_horizon: int = 16
     max_steps: int = 1300
+    max_episodes_per_task: Optional[int] = None
     save_dir: str = "runs/evaluation"
     overwrite: bool = False
 
@@ -47,6 +48,7 @@ class Args:
     re_eval_tasks: str = "" # tasks split by comma
     only_tasks: str = "" # tasks split by comma
     exclude_tasks: str = "" # tasks split by comma
+    only_episodes: str = "" # episode ids split by comma
 
     # VLM subgoal predictor
     use_oracle: bool = False
@@ -61,6 +63,15 @@ class Args:
     subgoal_keep_period: int = 1 # ever subgoal should be kept for this many steps
     # this can accelerate the evaluation process for symbolic memory
     # In our experiments, we just set this to 1
+    use_pickxtimes_progress: bool = False
+    use_pickxtimes_stuck_fallback: bool = False
+    use_pickxtimes_perceptual_verifier: bool = True
+    progress_vlm_call_period_steps: int = 64
+    progress_pick_min_steps: int = 64
+    progress_place_min_steps: int = 96
+    progress_pick_timeout_steps: int = 240
+    progress_place_timeout_steps: int = 280
+    progress_stop_timeout_steps: int = 144
 
 
 
@@ -228,6 +239,10 @@ def setup_save_directory(args: Args) -> Path:
     if args.subgoal_type in SUBGOAL_TYPES:
         if args.use_gemini:
             save_dir = save_dir / "gemini"
+        elif args.use_qwenvl and args.use_pickxtimes_progress:
+            save_dir = save_dir / "progress_qwenvl"
+        elif args.use_qwenvl and args.use_pickxtimes_stuck_fallback:
+            save_dir = save_dir / "fallback_qwenvl"
         elif args.use_qwenvl:
             save_dir = save_dir / "qwenvl"
         elif args.use_memer:
@@ -298,6 +313,9 @@ def evaluate(args: Args):
         for task in args.exclude_tasks.split(","):
             log_dict[task] = {str(i): False for i in range(50)}
 
+    if (args.max_episodes_per_task is not None or args.only_tasks or args.re_eval_tasks) and (save_dir / "log.json").exists():
+        (save_dir / "log.json").unlink()
+
     subgoal_predictor = build_subgoal_predictor(args, save_dir)
     evaluator = EpisodeEvaluator(args, save_dir)
 
@@ -308,10 +326,21 @@ def evaluate(args: Args):
 
             env_runner = EnvRunner(task_name, video_save_dir, max_steps=args.max_steps)
             num_episodes = env_runner.num_episodes
+            if args.max_episodes_per_task is not None:
+                num_episodes = min(num_episodes, args.max_episodes_per_task)
 
             success_flag = "unknown"
 
-            for episode_id in range(num_episodes):
+            if args.only_episodes:
+                episode_ids = [int(x) for x in args.only_episodes.split(",") if x.strip()]
+            else:
+                episode_ids = list(range(num_episodes))
+
+            for episode_id in episode_ids:
+                if episode_id >= num_episodes:
+                    print(f"[robomme] episode {episode_id} is outside available range 0-{num_episodes - 1}, skipping...")
+                    continue
+
                 if str(episode_id) in log_dict[task_name]:
                     print(f"[robomme] episode {episode_id} already evaluated, skipping...")
                     continue

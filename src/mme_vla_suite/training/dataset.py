@@ -62,7 +62,7 @@ class RoboMMEDataset(Dataset):
             self.num_views = self.history_config.num_views
             self.streaming_obs_horizon = self.history_config.streaming_obs_horizon
         
-            if self.history_config.representation_type == "perceptual":
+            if self.history_config.representation_type in ["perceptual", "dual"]:
                 self.mem_buffer = MemoryBuffer(
                     num_views=self.num_views,
                     img_emb_dim=self.img_emb_dim,
@@ -185,6 +185,94 @@ class RoboMMEDataset(Dataset):
 
         new_subgoal = subgoal.replace(f'at <{x}, {y}>', f'at <{x + noise_x}, {y + noise_y}>')
         return new_subgoal
+
+    def _same_episode_subgoal_from_index(self, idx: int, base_data: dict, *, online: bool) -> tuple[str, str] | None:
+        if idx < 0 or idx >= len(self.dataset):
+            return None
+
+        candidate = self.dataset[idx]
+        if candidate["epis_idx"].item() != base_data["epis_idx"].item():
+            return None
+        if candidate["step_idx"].item() >= base_data["step_idx"].item():
+            return None
+
+        suffix = "_online" if online else ""
+        return candidate[f"simple_subgoal{suffix}"], candidate[f"grounded_subgoal{suffix}"]
+
+    def _previous_different_subgoals(
+        self,
+        idx: int,
+        base_data: dict,
+        *,
+        online: bool,
+        max_lookback: int,
+    ) -> list[tuple[str, str]]:
+        suffix = "_online" if online else ""
+        current = (
+            base_data["simple_subgoal"],
+            base_data["grounded_subgoal"],
+        )
+        previous = []
+        seen = set()
+
+        for prev_idx in range(idx - 1, max(-1, idx - max_lookback - 1), -1):
+            if prev_idx < 0:
+                break
+            candidate = self.dataset[prev_idx]
+            if candidate["epis_idx"].item() != base_data["epis_idx"].item():
+                break
+            if candidate["step_idx"].item() >= base_data["step_idx"].item():
+                continue
+
+            subgoals = (
+                candidate[f"simple_subgoal{suffix}"],
+                candidate[f"grounded_subgoal{suffix}"],
+            )
+            if subgoals == current or subgoals in seen:
+                continue
+            previous.append(subgoals)
+            seen.add(subgoals)
+
+        return previous
+
+    def maybe_add_stale_symbolic_augmentation(self, idx: int, data: dict, *, online: bool) -> dict:
+        if self.history_config is None:
+            return data
+        if self.history_config.representation_type != "dual":
+            return data
+
+        aug_config = self.history_config.get("symbolic_stale_augmentation", {})
+        if not aug_config.get("enabled", False):
+            return data
+
+        stale_prob = float(aug_config.get("stale_prob", 0.0))
+        repeat_prob = float(aug_config.get("repeat_prob", 0.0))
+        max_lookback = int(aug_config.get("max_lookback", 24))
+        draw = random.random()
+        if draw >= stale_prob + repeat_prob:
+            return data
+
+        previous = self._previous_different_subgoals(
+            idx,
+            data,
+            online=online,
+            max_lookback=max_lookback,
+        )
+        if previous:
+            stale_subgoals = previous[0] if draw < stale_prob else random.choice(previous)
+        else:
+            lookback = random.randint(1, max(1, max_lookback))
+            stale_subgoals = self._same_episode_subgoal_from_index(
+                idx - lookback,
+                data,
+                online=online,
+            )
+            if stale_subgoals is None:
+                return data
+
+        data = dict(data)
+        data["simple_subgoal"], data["grounded_subgoal"] = stale_subgoals
+        return data
         
 
     def __getitem__(self, idx):
@@ -195,16 +283,23 @@ class RoboMMEDataset(Dataset):
         # During online evaluation, the ground-truth subgoal may change earlier than when it was recorded.
         # To make the model robust to this temporal shift and avoid train/test distribution mismatch,
         # we randomly sample from either subgoal or subgoal_online (early change).
-        if self.history_config is not None \
-            and self.history_config.representation_type == "symbolic" \
+        use_online_subgoal = self.history_config is not None \
+            and self.history_config.representation_type in ["symbolic", "dual"] \
             and self.history_config.symbolic_memory.type in ["simple_subgoal", "grounded_subgoal"] \
-            and random.random() < 0.5: 
+            and random.random() < 0.5
+        if use_online_subgoal: 
             data["simple_subgoal"] = data["simple_subgoal_online"]
             data["grounded_subgoal"] = data["grounded_subgoal_online"]
+
+        data = self.maybe_add_stale_symbolic_augmentation(
+            idx,
+            data,
+            online=use_online_subgoal,
+        )
         data.pop("simple_subgoal_online")
         data.pop("grounded_subgoal_online")
         
-        if self.history_config is not None and self.history_config.representation_type == "symbolic":
+        if self.history_config is not None and self.history_config.representation_type in ["symbolic", "dual"]:
             data["grounded_subgoal"] = self.add_grounding_augmentation(data["grounded_subgoal"], noise_range=8)
             data["simple_subgoal"] = self.add_grounding_augmentation(data["simple_subgoal"], noise_range=8)
  
@@ -215,7 +310,7 @@ class RoboMMEDataset(Dataset):
             step_idx = data["step_idx"].item()
             exec_start_idx = data["exec_start_idx"].item()
 
-            if self.history_config.representation_type == "perceptual":
+            if self.history_config.representation_type in ["perceptual", "dual"]:
                 if self.history_config.perceptual_memory.type == "token_dropping":
                     (
                         static_img_emb,

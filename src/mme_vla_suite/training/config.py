@@ -7,6 +7,7 @@ import pathlib
 from typing import Any, Literal, Protocol, TypeAlias
 
 import etils.epath as epath
+import flax.traverse_util as traverse_util
 import flax.nnx as nnx
 from typing_extensions import override
 import tyro
@@ -16,6 +17,7 @@ import openpi.models.model as _model
 import openpi.models.pi0_config as pi0_config
 import openpi.models.tokenizer as _tokenizer
 import openpi.shared.download as _download
+import openpi.shared.nnx_utils as nnx_utils
 import openpi.shared.normalize as _normalize
 import openpi.training.droid_rlds_dataset as droid_rlds_dataset
 import openpi.training.optimizer as _optimizer
@@ -237,7 +239,7 @@ class ModelTransformFactory(GroupFactory):
                 if model_config.use_history and model_config.history_config is not None:
                     loaded_config = get_history_config(model_config.history_config)
 
-                    if loaded_config.representation_type == "symbolic":
+                    if loaded_config.representation_type in ["symbolic", "dual"]:
                         symbolic_memory_type = loaded_config.symbolic_memory.type
                         max_token_len *= 2 # it's enough for subgoals, no need to set into 512.
                 
@@ -450,6 +452,70 @@ class MMEVLAWeightLoader(WeightLoader):
         return _merge_params(loaded_params, params, missing_regex=".*")
 
 
+@dataclasses.dataclass(frozen=True)
+class DualMemoryWeightLoader(WeightLoader):
+    symbolic_params_path: str
+    perceptual_params_path: str
+
+    def load(self, params: at.Params) -> at.Params:
+        import gc
+
+        flat_ref = traverse_util.flatten_dict(params, sep="/")
+
+        def is_perceptual_memory_key(key: str) -> bool:
+            return (
+                key.startswith("mem_encoder/")
+                or "/mem_attn/" in key
+                or "/mem_rms_norm_ffn/" in key
+            )
+
+        logging.info("Loading perceptual checkpoint for dual-memory initialization...")
+        perceptual_params = _model.restore_params(
+            download.maybe_download(self.perceptual_params_path),
+            restore_type=np.ndarray,
+        )
+        flat_perceptual = traverse_util.flatten_dict(perceptual_params, sep="/")
+        perceptual_memory_params = {}
+        perceptual_count = 0
+        for key, value in flat_perceptual.items():
+            if key in flat_ref and is_perceptual_memory_key(key):
+                ref = flat_ref[key]
+                perceptual_memory_params[key] = value.astype(ref.dtype) if value.dtype != ref.dtype else value
+                perceptual_count += 1
+
+        del perceptual_params, flat_perceptual
+        gc.collect()
+
+        logging.info("Loading symbolic checkpoint for dual-memory initialization...")
+        symbolic_params = _model.restore_params(
+            download.maybe_download(self.symbolic_params_path),
+            restore_type=np.ndarray,
+        )
+        flat_symbolic = traverse_util.flatten_dict(symbolic_params, sep="/")
+
+        merged = {}
+        symbolic_count = 0
+        for key, value in flat_symbolic.items():
+            if key in flat_ref:
+                ref = flat_ref[key]
+                merged[key] = value.astype(ref.dtype) if value.dtype != ref.dtype else value
+                symbolic_count += 1
+
+        merged.update(perceptual_memory_params)
+
+        logging.info(
+            "Dual-memory init merged %d symbolic params and overrode %d perceptual memory params.",
+            symbolic_count,
+            perceptual_count,
+        )
+
+        return _merge_params(
+            traverse_util.unflatten_dict(merged, sep="/"),
+            params,
+            missing_regex=".*",
+        )
+
+
 ####################### RoboMME #######################
 
 
@@ -553,6 +619,27 @@ class TrainConfig:
 
 OPENPI_DATA_HOME = os.getenv("OPENPI_DATA_HOME", "~/.cache/openpi")
 
+
+def dual_memory_lite_freeze_filter() -> Filter:
+    """Freeze everything except the dual-memory encoder and modulation adapters."""
+    trainable_memory = nnx.Any(
+        nnx_utils.PathRegex(".*mem_encoder.*"),
+        nnx_utils.PathRegex(".*mem_attn.*"),
+        nnx_utils.PathRegex(".*mem_rms_norm.*"),
+        nnx_utils.PathRegex(".*perceptual_memory_gate_logit.*"),
+    )
+    return nnx.Not(trainable_memory)
+
+
+def dual_memory_correction_freeze_filter() -> Filter:
+    """Freeze the backbone and memory encoder; train only latent correction adapters."""
+    trainable_correction = nnx.Any(
+        nnx_utils.PathRegex(".*mem_attn.*"),
+        nnx_utils.PathRegex(".*mem_rms_norm.*"),
+        nnx_utils.PathRegex(".*mem_correction_gate.*"),
+    )
+    return nnx.Not(trainable_correction)
+
 _CONFIGS = [
     TrainConfig(
         name="pi05_baseline",
@@ -615,8 +702,82 @@ _CONFIGS = [
         save_interval=10_000,
         keep_period=10_000,
         num_workers=4,
-        ema_decay=0.999,
+        ema_decay=None,
         fsdp_devices=4,
+    ),
+    TrainConfig(
+        name="mme_vla_suite_dual_lite",
+        model=history_pi0.HistoryPi0Config(
+            pi05=True,
+            action_horizon=20,
+            use_history=True,
+            history_config="dual-grounded-framesamp-modul.yaml",
+            discrete_state_input=False,
+        ),
+        data=RoboMMEDataConfig(
+            repo_id=f"robomme",
+            assets=AssetsConfig(
+                assets_dir="runs/ckpts/mme_vla_suite/symbolic-grounded-subgoal/79999/assets",
+            ),
+            base_config=DataConfig(prompt_from_task=True),
+        ),
+        batch_size=1,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=100,
+            peak_lr=1e-4,
+            decay_steps=2_000,
+            decay_lr=1e-5,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        freeze_filter=dual_memory_lite_freeze_filter(),
+        weight_loader=DualMemoryWeightLoader(
+            symbolic_params_path="runs/ckpts/mme_vla_suite/symbolic-grounded-subgoal/79999/params",
+            perceptual_params_path="runs/ckpts/mme_vla_suite/perceptual-framesamp-modul/79999/params",
+        ),
+        num_train_steps=2_000,
+        save_interval=500,
+        keep_period=500,
+        num_workers=2,
+        ema_decay=None,
+        fsdp_devices=1,
+        wandb_enabled=False,
+    ),
+    TrainConfig(
+        name="mme_vla_suite_dual_correction",
+        model=history_pi0.HistoryPi0Config(
+            pi05=True,
+            action_horizon=20,
+            use_history=True,
+            history_config="dual-grounded-framesamp-correction.yaml",
+            discrete_state_input=False,
+        ),
+        data=RoboMMEDataConfig(
+            repo_id=f"robomme",
+            assets=AssetsConfig(
+                assets_dir="runs/ckpts/mme_vla_suite/symbolic-grounded-subgoal/79999/assets",
+            ),
+            base_config=DataConfig(prompt_from_task=True),
+        ),
+        batch_size=1,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=100,
+            peak_lr=1e-4,
+            decay_steps=2_000,
+            decay_lr=1e-5,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        freeze_filter=dual_memory_correction_freeze_filter(),
+        weight_loader=DualMemoryWeightLoader(
+            symbolic_params_path="runs/ckpts/mme_vla_suite/symbolic-grounded-subgoal/79999/params",
+            perceptual_params_path="runs/ckpts/mme_vla_suite/perceptual-framesamp-modul/79999/params",
+        ),
+        num_train_steps=2_000,
+        save_interval=500,
+        keep_period=500,
+        num_workers=2,
+        ema_decay=None,
+        fsdp_devices=1,
+        wandb_enabled=False,
     ),
 ]
 

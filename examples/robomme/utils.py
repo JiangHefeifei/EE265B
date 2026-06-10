@@ -99,7 +99,11 @@ class RolloutRecorder:
         return points
         
     def record(self, image: np.ndarray, wrist_image: np.ndarray, state: np.ndarray, action: np.ndarray=None, is_video_demo: bool=False, subgoal: Optional[str] = None):
-        
+        if image.shape[0] != wrist_image.shape[0]:
+            target_h = image.shape[0]
+            target_w = max(1, round(wrist_image.shape[1] * target_h / wrist_image.shape[0]))
+            wrist_image = cv2.resize(wrist_image, (target_w, target_h), interpolation=cv2.INTER_LINEAR)
+
         concat_image = np.concatenate([image, wrist_image], axis=1)
         if is_video_demo: # add a red border
             concat_image = cv2.rectangle(concat_image, (0, 0), (concat_image.shape[1], concat_image.shape[0]), (255, 0, 0), 10)

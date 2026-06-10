@@ -37,7 +37,12 @@ class Qwen3VLModel:
         self.engine = PtEngine(
             model_id_or_path='Qwen/Qwen3-VL-4B-Instruct',
             adapters=[adapter_path],
-            attn_impl='flash_attention_2' #'sdpa'
+            attn_impl='sdpa',
+            use_hf=True,
+            device_map=os.environ.get("QWENVL_DEVICE_MAP", "auto"),
+            model_kwargs={
+                "offload_buffers": os.environ.get("QWENVL_OFFLOAD_BUFFERS", "true").lower() == "true",
+            },
         )
         
     def _parse_box_patterns(self, subgoal: str, replacement: str = "scaled_coords", return_bbox: bool = False):
@@ -128,7 +133,10 @@ class Qwen3VLModel:
         if matches:
             bbox = [[int(float(match[0])/1000*self.image_size[1]), int(float(match[1])/1000*self.image_size[0])] for match in matches]
         else:
-            bbox = []        
+            point_matches = re.findall(r'<\s*(\d+)\s*,\s*(\d+)\s*>', subgoal)
+            bbox = [[int(match[0]), int(match[1])] for match in point_matches]
+            subgoal = re.sub(r'<\s*(\d+)\s*,\s*(\d+)\s*>', '<bbox>', subgoal)
+            return subgoal, bbox
         response = re.sub(
             r'<\|box_start\|>\((\d+),(\d+)\)<\|box_end\|>',
             '<bbox>',
@@ -202,7 +210,7 @@ class Qwen3VLModel:
         return InferRequest(**infer_request_dict)
     
     
-    def call(self, image_query: np.ndarray, step_idx: int, keep_period: int = 0) -> str:        
+    def call(self, image_query: np.ndarray, step_idx: int, keep_period: int = 0, update_history: bool = True) -> str:
         if step_idx <= keep_period and self.last_response is not None:
             # some tasks that require press button, qwen models always skip
             # add some hard-coded rules to fix it
@@ -213,6 +221,66 @@ class Qwen3VLModel:
             response = response[0].choices[0].message.content
         
         print("Response: ", response)
+        self.last_response = response
+        if update_history:
+            self.update_history_subgoals(response)
+        return self._parse_subgoal_for_vla(response)
+
+    def call_revision(
+        self,
+        image_queries: List[np.ndarray],
+        step_idx: int,
+        candidate_subgoal: str,
+        expected_subgoal: str,
+        progress_state: str,
+    ) -> str:
+        image_paths = []
+        for i, image_query in enumerate(image_queries):
+            image_path = os.path.join(self.save_dir, f"step_{step_idx}_revision_{i}.png")
+            imageio.imwrite(image_path, image_query)
+            image_paths.append(image_path)
+
+        history = (
+            self._wrap_history_subgoals(self.history_grounded_subgoals)
+            if self.subgoal_type == "grounded_subgoal"
+            else self._wrap_history_subgoals(self.history_simple_subgoals)
+        )
+        user_prompt = (
+            f"The task goal is: {self.task_goal}\n"
+            "The images are recent execution frames in chronological order, ending with the current observation.\n"
+            f"Accepted subgoal history: {history if history else 'None'}\n"
+            f"Progress state: {progress_state}\n"
+            f"Allowed subgoal choices from the counting plan: {expected_subgoal}\n"
+            f"Candidate subgoal proposed by the model: {candidate_subgoal}\n\n"
+            "Use the recent visual execution history to decide whether the robot should continue the current subgoal "
+            "or move to the next subgoal. If the candidate repeats an already completed count, return the next subgoal. "
+            "If the current subgoal is not visually complete yet, return the current subgoal. "
+            "Return exactly one grounded language subgoal for the robot to execute next. "
+            "Do not explain your decision."
+        )
+
+        infer_request_dict = {
+            "messages": [
+                {"role": "system", "content": self.system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            "images": image_paths,
+        }
+        if self.subgoal_type == "grounded_subgoal":
+            infer_request_dict["objects"] = {"ref": [], "bbox": self.history_grounded_bboxes}
+
+        print("\n\n")
+        pprint.pprint(infer_request_dict)
+        with open(self.save_json_path, "a") as f:
+            json.dump(infer_request_dict, f)
+            f.write("\n")
+
+        response = self.engine.infer(
+            [InferRequest(**infer_request_dict)],
+            request_config=RequestConfig(max_tokens=128, temperature=0),
+        )
+        response = response[0].choices[0].message.content
+        print("Revision Response: ", response)
         self.last_response = response
         self.update_history_subgoals(response)
         return self._parse_subgoal_for_vla(response)

@@ -108,6 +108,25 @@ class MemoryAttention(nn.Module):
         return out_einsum("BTNH,NHD->BTD", encoded)
 
 
+class MemoryCorrectionGate(nn.Module):
+    """Token-wise gate for latent perceptual memory correction."""
+
+    init_bias: float = -4.0
+
+    @nn.compact
+    def __call__(self, x, mem_mod_vec):
+        dtype = x.dtype
+        gate_inputs = jnp.concatenate([x, mem_mod_vec], axis=-1)
+        gate_logits = nn.Dense(
+            1,
+            kernel_init=nn.initializers.zeros_init(),
+            bias_init=nn.initializers.constant(self.init_bias),
+            dtype=dtype,
+            name="gate_proj",
+        )(gate_inputs)
+        return jax.nn.sigmoid(gate_logits).astype(dtype)
+
+
 @at.typecheck
 class HistoryBlock(nn.Module):
     """Transformer block."""
@@ -118,6 +137,8 @@ class HistoryBlock(nn.Module):
     dropout_bdims: tuple[int, ...] = ()
 
     integration_type: str | None = None
+    correction_gate_enabled: bool = False
+    correction_gate_init_bias: float = -4.0
 
     @nn.compact
     def __call__(
@@ -134,6 +155,11 @@ class HistoryBlock(nn.Module):
 
         if self.integration_type == "modulation":
             mem_attn = MemoryAttention(name="mem_attn")
+            if self.correction_gate_enabled:
+                mem_correction_gate = MemoryCorrectionGate(
+                    init_bias=self.correction_gate_init_bias,
+                    name="mem_correction_gate",
+                )
 
         xs = sharding.activation_sharding_constraint(xs)
         drop = (
@@ -176,6 +202,8 @@ class HistoryBlock(nn.Module):
                 # Add Memory Modulation before FFN
                 if i == len(xs) - 1 and self.integration_type == "modulation":
                     mem_mod_vec = mem_attn(x, mem_seq[-1], mem_mask[-1])
+                    if self.correction_gate_enabled:
+                        mem_mod_vec = mem_mod_vec * mem_correction_gate(x, mem_mod_vec)
                     x = MemoryRMSNorm(name="mem_rms_norm_ffn")(x, mem_mod_vec)  
                 
                 name=_name("pre_ffw_norm", i) if self.integration_type != "expert" else _name("pre_ffw_norm", i-1)
@@ -222,6 +250,8 @@ class Module(nn.Module):
     adarms: bool = False
     
     integration_type: str | None = None
+    correction_gate_enabled: bool = False
+    correction_gate_init_bias: float = -4.0
 
     def setup(self):
         # all experts must have the same depth
@@ -257,6 +287,8 @@ class Module(nn.Module):
             dropout=self.dropout,
             dropout_bdims=self.dropout_bdims,
             integration_type=self.integration_type,
+            correction_gate_enabled=self.correction_gate_enabled,
+            correction_gate_init_bias=self.correction_gate_init_bias,
         )
         self.final_norms = [
             RMSNorm(name=_name("final_norm", i) if self.integration_type != "expert" else _name("final_norm", i-1)) for i in range(len(self.configs))

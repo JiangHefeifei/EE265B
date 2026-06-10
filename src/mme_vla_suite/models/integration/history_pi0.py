@@ -91,7 +91,7 @@ class HistoryPi0Config(Pi0Config):
             config_with_loaded_history = dataclasses.replace(self, history_config=loaded_config)
             
             max_token_len = self.max_token_len
-            if loaded_config.representation_type == "symbolic":
+            if loaded_config.representation_type in ["symbolic", "dual"]:
                 if loaded_config.symbolic_memory.type in ["simple_subgoal", "grounded_subgoal"]:
                     max_token_len *= 2
                 else:
@@ -121,7 +121,17 @@ class HistoryPi0Config(Pi0Config):
                             [batch_size, self.max_token_len], bool
                         ),
                     )
-                elif self.history_config.representation_type == "perceptual":
+                elif self.history_config.representation_type in ["perceptual", "dual"]:
+                    symbolic_kwargs = {}
+                    if self.history_config.representation_type == "dual":
+                        symbolic_kwargs = {
+                            "symbolic_tokenized_prompt": jax.ShapeDtypeStruct(
+                                [batch_size, self.max_token_len], jnp.int32
+                            ),
+                            "symbolic_tokenized_prompt_mask": jax.ShapeDtypeStruct(
+                                [batch_size, self.max_token_len], bool
+                            ),
+                        }
                     observation_spec = HistAugObservation.from_base_obs(
                         base_obs_spec,
                         static_image_emb=jax.ShapeDtypeStruct(
@@ -152,6 +162,7 @@ class HistoryPi0Config(Pi0Config):
                             ],
                             jnp.float32,
                         ),
+                        **symbolic_kwargs,
                     )
                 elif self.history_config.representation_type == "recurrent":
                     observation_spec = HistAugObservation.from_base_obs(
@@ -249,11 +260,19 @@ class HistoryPi0(BaseModel):
             self.integration_type = config.history_config.integration_type
             self.representation_type = config.history_config.representation_type
             assert self.integration_type in ["context", "modulation", "expert"]
-            assert self.representation_type in ["perceptual", "recurrent", "symbolic"]
+            assert self.representation_type in ["perceptual", "recurrent", "symbolic", "dual"]
 
-            if self.representation_type == "perceptual":
+            if self.representation_type in ["perceptual", "dual"]:
                 from mme_vla_suite.models.representation.percep_mem import (
                     PerceptualMemory,
+                )
+
+                correction_gate_config = self.history_config.get("correction_gate", {})
+                self.correction_gate_enabled = bool(
+                    correction_gate_config.get("enabled", False)
+                )
+                self.correction_gate_init_bias = float(
+                    correction_gate_config.get("init_bias", -4.0)
                 )
 
                 self.mem_encoder = PerceptualMemory(
@@ -261,6 +280,14 @@ class HistoryPi0(BaseModel):
                     rngs=rngs,
                     dtype=config.dtype,
                 )
+                if (
+                    self.representation_type == "dual"
+                    and self.integration_type == "modulation"
+                    and not self.correction_gate_enabled
+                ):
+                    self.perceptual_memory_gate_logit = nnx.Param(
+                        jnp.array(-2.0, dtype=jnp.float32)
+                    )
             elif self.representation_type == "recurrent":
                 from mme_vla_suite.models.representation.recur_mem import (
                     RecurrentMemory,
@@ -283,7 +310,7 @@ class HistoryPi0(BaseModel):
             print(
                 f"====== Using History, Representation Type: {self.representation_type} , Integration Type: {self.integration_type} ======"
             )
-            if self.representation_type == "perceptual":
+            if self.representation_type in ["perceptual", "dual"]:
                 print(f"Perceptual Memory using {self.history_config.perceptual_memory.type} type\n")
             elif self.representation_type == "recurrent":
                 print(f"Recurrent Memory using {self.history_config.recurrent_memory.type} type\n")
@@ -319,6 +346,12 @@ class HistoryPi0(BaseModel):
                         embed_dtype=config.dtype,
                         adarms=config.pi05,
                         integration_type=self.integration_type,
+                        correction_gate_enabled=getattr(
+                            self, "correction_gate_enabled", False
+                        ),
+                        correction_gate_init_bias=getattr(
+                            self, "correction_gate_init_bias", -4.0
+                        ),
                     )
                 )
                 llm.lazy_init(
@@ -340,6 +373,7 @@ class HistoryPi0(BaseModel):
                     embed_dtype=config.dtype,
                     adarms=config.pi05,
                     integration_type=self.integration_type,
+                    correction_gate_enabled=False,
                 )
             )
             llm.lazy_init(
@@ -393,7 +427,7 @@ class HistoryPi0(BaseModel):
 
     @at.typecheck
     def embed_memory(self, obs: HistAugObservation):
-        if self.representation_type == "perceptual":
+        if self.representation_type in ["perceptual", "dual"]:
             tokens, _, stats = self.mem_encoder(
                 obs.static_image_emb, obs.static_pos_emb, obs.static_state_emb
             )
@@ -413,6 +447,20 @@ class HistoryPi0(BaseModel):
             na_mask = None
             stats = None
         return tokens, input_mask, ar_mask, na_mask, stats
+
+    def apply_perceptual_memory_gate(self, mem_seq, stats):
+        if (
+            self.representation_type == "dual"
+            and self.integration_type == "modulation"
+            and not getattr(self, "correction_gate_enabled", False)
+            and hasattr(self, "perceptual_memory_gate_logit")
+        ):
+            gate = jax.nn.sigmoid(self.perceptual_memory_gate_logit.value)
+            mem_seq = mem_seq * gate.astype(mem_seq.dtype)
+            if isinstance(stats, dict):
+                stats = dict(stats)
+                stats["perceptual_memory_gate"] = gate
+        return mem_seq, stats
 
     @at.typecheck
     def embed_prefix(
@@ -465,7 +513,7 @@ class HistoryPi0(BaseModel):
             na_mask += [True] * image_tokens.shape[1]
 
         # add language (aka tokenized inputs)
-        if self.use_history and self.representation_type == "symbolic":
+        if self.use_history and self.representation_type in ["symbolic", "dual"]:
             tokenized_inputs = self.PaliGemma.llm(
                 obs.symbolic_tokenized_prompt, method="embed"
             )
@@ -615,6 +663,7 @@ class HistoryPi0(BaseModel):
             )
         elif self.integration_type == "modulation":
             mem_seq, mem_mask, _, _, stats = self.embed_memory(observation)
+            mem_seq, stats = self.apply_perceptual_memory_gate(mem_seq, stats)
             (prefix_out, suffix_out), _ = self.PaliGemma.llm(
                 [prefix_tokens, suffix_tokens],
                 mask=attn_mask,
@@ -683,6 +732,7 @@ class HistoryPi0(BaseModel):
                 [prefix_tokens, None], mask=prefix_attn_mask, positions=positions
             )
             mem_seq, mem_mask, _, _, _ = self.embed_memory(observation)
+            mem_seq, _ = self.apply_perceptual_memory_gate(mem_seq, None)
             
         else:
             prefix_tokens, prefix_mask, prefix_ar_mask, prefix_na_mask, _ = self.embed_prefix(observation)

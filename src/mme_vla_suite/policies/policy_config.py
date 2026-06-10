@@ -33,7 +33,7 @@ def create_trained_policy(
     history_config_path = checkpoint_dir.parent / "history_config.txt"
     if history_config_path.exists():
         with open(history_config_path, "r") as f:
-            history_config = f.read()
+            history_config = f.read().strip()
     
     if train_config.model.history_config != history_config:
         print(f" == You are using {train_config.model.history_config}, changing to {history_config} ==")

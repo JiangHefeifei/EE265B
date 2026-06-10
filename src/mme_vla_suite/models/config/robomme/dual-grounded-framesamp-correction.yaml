@@ -1,0 +1,32 @@
+budget: 512
+num_views: 1
+token_per_image: 16
+streaming_obs_horizon: 16
+pool_type: mean
+use_pos_emb: true
+use_state_emb: false
+memory_feature:
+  img:
+    net: identity
+    input_dim: 2048
+  pos:
+    input_dim: 768
+    hidden_dim: 768
+  state:
+    input_dim: 8
+    hidden_dim: 512
+integration_type: modulation
+memory_token_dim: 1024
+representation_type: dual
+perceptual_memory:
+  type: frame_sampling
+symbolic_memory:
+  type: grounded_subgoal
+correction_gate:
+  enabled: true
+  init_bias: -4.0
+symbolic_stale_augmentation:
+  enabled: true
+  stale_prob: 0.35
+  repeat_prob: 0.15
+  max_lookback: 96

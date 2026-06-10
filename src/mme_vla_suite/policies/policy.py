@@ -139,7 +139,7 @@ class MME_VLA_Policy:
             inputs["recur_pos_emb"] = recur_pos_emb
             inputs["recur_state_emb"] = self._normalize_state(recur_state_emb)
             inputs["recur_mask"] = recur_mask
-        elif self.config.representation_type == "perceptual":
+        elif self.config.representation_type in ["perceptual", "dual"]:
             history_feats_gather_fn = self.mem_buffer.default_history_feats_gather_fn
             token_budget = self.config.budget
             

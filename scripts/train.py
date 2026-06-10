@@ -1,6 +1,7 @@
 import dataclasses
 import functools
 import logging
+import os
 import platform
 import jax
 import jax.numpy as jnp
@@ -99,10 +100,14 @@ def _load_weights_and_validate(
     loader: _weight_loaders.WeightLoader, params_shape: at.Params
 ) -> at.Params:
     """Loads and validates the weights. Returns a loaded subset of the weights."""
+    logging.info("Loading initial weights...")
+    start_time = time.time()
     loaded_params = loader.load(params_shape)
+    logging.info(f"Loaded initial weights in {time.time() - start_time:.2f}s; validating...")
     at.check_pytree_equality(
         expected=params_shape, got=loaded_params, check_shapes=True, check_dtypes=True
     )
+    logging.info("Initial weights validated.")
 
     # Remove jax.ShapeDtypeStruct from the loaded params. This makes sure that only the loaded params are returned.
     return traverse_util.unflatten_dict(
@@ -182,7 +187,10 @@ def init_train_state(
             ema_params=None if config.ema_decay is None else params,
         )
 
+    logging.info("Tracing train state shape...")
+    start_time = time.time()
     train_state_shape = jax.eval_shape(init, init_rng)
+    logging.info(f"Traced train state shape in {time.time() - start_time:.2f}s.")
     state_sharding = sharding.fsdp_sharding(train_state_shape, mesh, log=True)
 
     if resume:
@@ -198,12 +206,15 @@ def init_train_state(
     replicated_sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec())
 
     # Initialize the train state and mix in the partial params.
+    logging.info("Initializing sharded train state...")
+    start_time = time.time()
     train_state = jax.jit(
         init,
         donate_argnums=(1,),  # donate the partial params buffer.
         in_shardings=replicated_sharding,
         out_shardings=state_sharding,
     )(init_rng, partial_params)
+    logging.info(f"Initialized sharded train state in {time.time() - start_time:.2f}s.")
 
     return train_state, state_sharding
 
@@ -325,7 +336,10 @@ def main(config: _config.TrainConfig, tentative_run: bool = False):
 
     jax.config.update(
         "jax_compilation_cache_dir",
-        str(epath.Path(f"~/.cache/jax_{config.exp_name}").expanduser()),
+        os.environ.get(
+            "JAX_COMPILATION_CACHE_DIR",
+            str(epath.Path(f"~/.cache/jax_{config.exp_name}").expanduser()),
+        ),
     )
 
     rng = jax.random.key(config.seed)

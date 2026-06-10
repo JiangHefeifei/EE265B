@@ -2,6 +2,7 @@
 RoboMME environment runing wrapper: build envs, get observations, and step with a uniform API.
 """
 from __future__ import annotations
+import os
 from typing import Any
 import numpy as np
 
@@ -34,6 +35,7 @@ class EnvRunner:
             dataset="test",
             action_space="joint_angle",
             gui_render=False,
+            override_metadata_path=os.environ.get("ROBOMME_METADATA_DIR") or None,
             max_steps=max_steps,
         )
 
