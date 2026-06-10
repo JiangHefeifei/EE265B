@@ -45,30 +45,25 @@ Long-horizon manipulation tasks are often non-Markovian: the current observation
 \section{Introduction}
 \label{sec:intro}
 
-Most robot manipulation research targets short-horizon skills: grasp a cup, insert a plug, open a drawer. A single observation usually contains everything the policy needs, and once the skill succeeds the episode ends. Long-horizon tasks break this assumption. When a robot must tidy a table or repeat a pick-and-place motion $N$ times, task progress stretches across hundreds of control steps, and the task becomes \emph{non-Markovian}: the current camera frame no longer reveals \emph{where in the task} the robot is. The policy must remember---how many repetitions are done, what it saw earlier, which sub-task comes next.
+Most robot manipulation research targets short-horizon skills---grasp a cup, insert a plug---where a single observation contains everything the policy needs. Long-horizon tasks break this assumption: when a robot must repeat a pick-and-place motion $N$ times, progress stretches across hundreds of control steps and the task becomes \emph{non-Markovian}---the current camera frame no longer reveals where in the task the robot is. The policy must remember.
 
-Counting tasks isolate this difficulty in its cleanest form. In the PickXTimes task of the RoboMME benchmark~\cite{robomme2026}, a robot must pick and place a cube a specified number of times and then press a button to stop. After every repetition the scene returns to a visually near-identical configuration; the only quantity separating ``done twice'' from ``done three times'' is an internal count $k$ that exists nowhere in the pixels. Success is binary and interpretable---either the policy kept count or it lost it---which makes counting an ideal probe for studying memory mechanisms in isolation.
+Counting tasks isolate this difficulty in its cleanest form. In the PickXTimes task of the RoboMME benchmark~\cite{robomme2026}, a robot must pick and place a cube a specified number of times and then press a button to stop. After every repetition the scene returns to a visually near-identical configuration; the only quantity separating ``done twice'' from ``done three times'' is an internal count $k$ that exists nowhere in the pixels. Success is binary and interpretable, which makes counting an ideal probe for studying memory in isolation.
 
-RoboMME equips a shared $\pi_{0.5}$ backbone~\cite{pi05} with three families of memory representation and evaluates each \emph{in isolation}: \emph{symbolic} memory stores history as language subgoals written by an auxiliary VLM; \emph{perceptual} memory stores compressed visual tokens from past frames; \emph{recurrent} memory compresses history into a fixed-size latent state. Its central finding is that no single representation dominates---each carries the count $k$ in a different and differently flawed way. Symbolic memory can state the count explicitly (``placed 2 of 3'') but inherits the instability of the VLM that writes it: in realistic settings the VLM miscounts, and reported counting performance drops far below what the same representation achieves with oracle subgoals. Perceptual memory is learned end-to-end and needs no external model, but the count is never written anywhere---it must \emph{emerge} from a stack of near-identical frames.
+RoboMME equips a shared $\pi_{0.5}$ backbone~\cite{pi05} with three families of memory representation and evaluates each \emph{in isolation}: \emph{symbolic} memory stores history as language subgoals written by an auxiliary VLM, \emph{perceptual} memory stores compressed visual tokens from past frames, and \emph{recurrent} memory compresses history into a fixed-size latent. Its central finding is that no single representation dominates---each carries the count $k$ in a differently flawed way. Symbolic memory can state the count explicitly (``placed 2 of 3'') but inherits the instability of the VLM that writes it. Perceptual memory is end-to-end and needs no external model, but the count is never written anywhere---it must \emph{emerge} from a stack of near-identical frames.
 
-These two failure modes are complementary, which suggests an obvious question that RoboMME leaves open: \textbf{what happens when the two representations are combined---and can one repair the other?} This report describes a dual-memory VLA policy built to answer that question on PickXTimes. Symbolic grounded subgoals enter through the language prompt; perceptual frame-sampling memory modulates the action expert; and a learned token-wise \emph{correction gate} lets visual evidence suppress the symbolic pathway when the subgoal is wrong or outdated. Because the dominant VLM failure we observed is \emph{staleness}---the VLM re-emitting a subgoal from several steps ago---we additionally introduce a \emph{stale-subgoal augmentation} that injects outdated subgoals during training, teaching the policy what an untrustworthy subgoal looks like.
+These failure modes are complementary, which suggests a question RoboMME leaves open: \textbf{what happens when the two representations are combined---and can one repair the other?} This report answers it on PickXTimes with a dual-memory VLA policy: symbolic grounded subgoals enter through the language prompt; perceptual frame-sampling memory modulates the action expert; and a learned token-wise \emph{correction gate} lets visual evidence suppress the symbolic pathway when the subgoal is wrong. Because the dominant VLM failure we observed is \emph{staleness}---re-emitting a subgoal from several steps ago---we additionally inject outdated subgoals during training, teaching the policy what an untrustworthy subgoal looks like.
 
-We make three contributions:
-\begin{enumerate}
-  \item \textbf{A dual-memory architecture on RoboMME.} To our knowledge this is the first attempt to combine symbolic and perceptual memory representations within the RoboMME/MME-VLA framework, where all fourteen released variants use a single representation. The design reuses each representation's strongest integration mechanism (subgoals as prompt context; perceptual tokens as action-expert modulation), merges two independently trained checkpoints with a dedicated weight loader, and fine-tunes only lightweight adapter modules.
-  \item \textbf{A correction mechanism for unreliable subgoals.} A token-wise sigmoid gate, initialized to suppress memory, learns when perceptual evidence should override symbolic content, complemented by a stale-subgoal training augmentation that simulates the VLM's real failure distribution.
-  \item \textbf{An empirical analysis of \emph{why} the symbolic pathway fails.} Through case studies on PickXTimes rollouts we characterize VLM subgoal drift and stale repetition, show that perceptual information is most useful as a verification layer, and quantify the practical cost of VLM-based verification---findings we believe are more transferable than any single success-rate number.
-\end{enumerate}
+We make three contributions: (1)~\textbf{a dual-memory architecture on RoboMME}---to our knowledge the first to combine symbolic and perceptual representations in this framework, where all fourteen released variants are single-representation; each pathway keeps its strongest integration mechanism, two independently trained checkpoints are merged, and only lightweight adapters are fine-tuned; (2)~\textbf{a correction mechanism for unreliable subgoals}---a token-wise sigmoid gate plus a stale-subgoal augmentation that simulates the VLM's real failure distribution; and (3)~\textbf{an empirical analysis of \emph{why} the symbolic pathway fails}---characterizing subgoal drift and stale repetition, showing perceptual information works best as a verification layer, and quantifying the cost of VLM-based verification. We consider the third contribution the most transferable.
 
 %===============================================================================
 \section{Related Work}
 \label{sec:related}
 
-\textbf{Vision--language--action models.} Large VLA policies map raw observations and language instructions directly to robot actions. Representative systems include OpenVLA~\cite{openvla} and the $\pi_0$/$\pi_{0.5}$ family~\cite{pi0,pi05}, which couple a pretrained vision--language backbone with a flow-matching action expert; low-level imitation learners such as ACT~\cite{act} and Diffusion Policy~\cite{diffusionpolicy} established the action-chunking foundations these systems build on. These models are predominantly \emph{Markovian}: they condition on the current observation (or a short window) and struggle on history-dependent tasks, which is precisely the regime this report targets.
+\textbf{Vision--language--action models.} Large VLA policies map observations and language instructions directly to actions: OpenVLA~\cite{openvla} and the $\pi_0$/$\pi_{0.5}$ family~\cite{pi0,pi05} couple a pretrained vision--language backbone with a flow-matching action expert, building on action-chunking imitation learners such as ACT~\cite{act} and Diffusion Policy~\cite{diffusionpolicy}. These models are predominantly \emph{Markovian} and struggle on history-dependent tasks---the regime this report targets.
 
-\textbf{Memory for manipulation policies.} A growing line of work augments VLAs with memory. MemoryVLA~\cite{memoryvla} maintains a perceptual--cognitive memory bank for long-horizon manipulation; MemER~\cite{memer} retrieves keyframes from episodic experience and is the strongest external method on RoboMME; RMBench~\cite{rmbench} classifies tasks by how many past observations must be retained. Recurrent mechanisms such as Recurrent Memory Transformers~\cite{rmt} and test-time-training layers~\cite{ttt} compress history into fixed-size states but were found unstable when grafted onto a pretrained VLA~\cite{robomme2026}. RoboMME~\cite{robomme2026} provides the systematic study our work builds on: a taxonomy of temporal, spatial, object, and procedural memory, sixteen ManiSkill tasks~\cite{maniskill3}, and fourteen memory-augmented variants of $\pi_{0.5}$ crossing three representations with three integration mechanisms under a fixed 512-token budget. All fourteen variants employ a \emph{single} representation; the authors explicitly note the representations are complementary and call for unified designs, which is the gap we address.
+\textbf{Memory for manipulation policies.} MemoryVLA~\cite{memoryvla} maintains a perceptual--cognitive memory bank; MemER~\cite{memer} retrieves keyframes from episodic experience; RMBench~\cite{rmbench} classifies tasks by how many past observations must be retained; recurrent mechanisms (RMT~\cite{rmt}, test-time training~\cite{ttt}) compress history into fixed-size states but proved unstable when grafted onto a pretrained VLA~\cite{robomme2026}. RoboMME~\cite{robomme2026} provides the systematic study we build on: sixteen ManiSkill~\cite{maniskill3} tasks across four memory types, and fourteen variants of $\pi_{0.5}$ crossing three representations with three integration mechanisms under a fixed 512-token budget. All fourteen variants employ a \emph{single} representation; the authors note the representations are complementary and call for unified designs---the gap we address.
 
-\textbf{Language subgoals and their correction.} Using language as an intermediate plan has a long history, from SayCan~\cite{saycan} and Inner Monologue~\cite{innermonologue} to RoboMME's symbolic memory, where a VLM (Gemini~\cite{gemini25} or a fine-tuned Qwen-VL~\cite{qwen25vl}) writes grounded subgoals such as ``pick up the green cube at $[63,152]$.'' The reliability of such generated language is a known weakness: DROC~\cite{droc} distills and retrieves human language corrections, and YAY Robot~\cite{yay} improves long-horizon performance from on-the-fly verbal feedback. Our work differs in that the correction signal is not human language but the policy's \emph{own perceptual memory}, applied in latent space through a learned gate---no human in the loop, and no extra VLM call at correction time.
+\textbf{Language subgoals and their correction.} Language as an intermediate plan runs from SayCan~\cite{saycan} and Inner Monologue~\cite{innermonologue} to RoboMME's symbolic memory, where a VLM (Gemini~\cite{gemini25} or a fine-tuned Qwen-VL~\cite{qwen25vl}) writes grounded subgoals such as ``pick up the green cube at $[63,152]$.'' The reliability of generated language is a known weakness: DROC~\cite{droc} distills and retrieves human corrections, and YAY Robot~\cite{yay} improves long-horizon performance from on-the-fly verbal feedback. Our correction signal is instead the policy's \emph{own perceptual memory}, applied in latent space through a learned gate---no human in the loop, no extra VLM call.
 
 %===============================================================================
 \section{Method}
@@ -77,14 +72,7 @@ We make three contributions:
 \subsection{Problem setting: carrying the count}
 \label{sec:method-setting}
 
-PickXTimes requires the policy to track a single hidden variable: the number of completed repetitions $k$, to be compared against the instructed target $N$ so the robot continues while $k<N$ and presses the stop button once $k=N$. The two memory pathways we combine carry $k$ in opposite ways:
-
-\begin{itemize}
-  \item \textbf{Symbolic (explicit).} An auxiliary VLM observes the rollout and writes a grounded subgoal that encodes the current stage---effectively stating $k$ in language. The form is ideal for counting, but the value is only as reliable as the VLM that writes it.
-  \item \textbf{Perceptual (implicit).} A frame-sampling memory retains pooled visual tokens from past observations; the count must be inferred from this visual history. The evidence is grounded and end-to-end trainable, but after each repetition the sampled frames are nearly identical, so the inferred count is fuzzy.
-\end{itemize}
-
-Our hypothesis is that these two estimates of the same quantity fail \emph{differently}, so a policy with access to both---plus a mechanism for arbitrating between them---should outperform either alone.
+PickXTimes requires the policy to track a single hidden variable: the number of completed repetitions $k$, compared against the instructed target $N$---continue while $k<N$, press stop once $k=N$. The two memory pathways we combine carry $k$ in opposite ways. \textbf{Symbolic (explicit)}: an auxiliary VLM writes a grounded subgoal encoding the current stage---effectively stating $k$ in language; the form is ideal for counting, but the value is only as reliable as the VLM that writes it. \textbf{Perceptual (implicit)}: a frame-sampling memory retains pooled visual tokens from past observations, from which the count must be inferred; the evidence is grounded and trainable end-to-end, but after each repetition the sampled frames are nearly identical, so the inferred count is fuzzy. These two estimates of the same quantity fail \emph{differently}---so a policy with both, plus a mechanism for arbitrating between them, should outperform either alone.
 
 \subsection{Dual-memory architecture}
 \label{sec:method-arch}
@@ -159,14 +147,7 @@ and the rescaled vector $\tilde{m}$ replaces $m$ in the modulation. The bias is 
 \subsection{Inference-time controllers: VLM-based verification}
 \label{sec:method-controllers}
 
-Orthogonal to the learned gate, we also implemented two inference-time subgoal controllers that use \emph{explicit} VLM verification, both to serve as strong baselines and to measure what correction is worth when cost is no object:
-
-\begin{itemize}
-  \item \textbf{Progress-verification controller.} After the QwenVL predictor proposes a subgoal, a second VLM call (\texttt{call\_revision}) receives four uniformly sampled recent frames, the candidate subgoal, and the expected stage sequence, and returns a verified or revised subgoal. This catches stage regressions at the price of doubling VLM traffic.
-  \item \textbf{Stuck-fallback controller.} A cheaper variant that issues a single VLM call per step and only triggers revision when the output is unparseable, regresses to an earlier stage, or a stage exceeds its time budget (minimum 64/96 steps and timeout 240/280 steps for pick/place respectively). If verification also fails, an internal stage machine generates the subgoal without any VLM.
-\end{itemize}
-
-These controllers fix symbolic errors \emph{symbolically}---by asking a VLM to double-check itself against recent frames. The correction gate of Section~\ref{sec:method-arch} can be seen as a learned, amortized replacement for exactly this verification step.
+Orthogonal to the learned gate, we implemented two inference-time controllers that use \emph{explicit} VLM verification, as strong baselines for what correction is worth when cost is no object. The \textbf{progress-verification controller} follows every QwenVL subgoal with a second VLM call that receives four recent frames, the candidate subgoal, and the expected stage sequence, and returns a verified or revised subgoal---catching stage regressions at the price of doubling VLM traffic. The \textbf{stuck-fallback controller} issues a single VLM call per step and triggers revision only when the output is unparseable, regresses to an earlier stage, or a stage exceeds its time budget; if verification also fails, an internal stage machine generates the subgoal without any VLM. Both fix symbolic errors \emph{symbolically}---by asking a VLM to double-check itself; the correction gate of Section~\ref{sec:method-arch} is a learned, amortized replacement for exactly this step.
 
 %===============================================================================
 \section{Experiments}
@@ -175,7 +156,9 @@ These controllers fix symbolic errors \emph{symbolically}---by asking a VLM to d
 \subsection{Setup}
 \label{sec:exp-setup}
 
-\textbf{Benchmark and task.} All experiments run on RoboMME~\cite{robomme2026}, built on the ManiSkill simulator~\cite{maniskill3} with a 7-DoF Franka Panda, front and wrist RGB cameras, and the benchmark's standard 512-token memory budget. We focus on \textbf{PickXTimes} from the Counting suite: pick and place a colored cube $N$ times, then press the stop button. Episodes run up to 1{,}300 steps; evaluation uses 20 episodes per configuration with held-out seeds (seed 7), and all policies are evaluated at training step 79{,}999 (dual variants fine-tuned from merged checkpoints as in Section~\ref{sec:method-training}).
+\textbf{Benchmark and task.} All experiments run on RoboMME~\cite{robomme2026}, built on the ManiSkill simulator~\cite{maniskill3} with a 7-DoF Franka Panda, front and wrist RGB cameras, and the benchmark's standard 512-token memory budget. We focus on \textbf{PickXTimes} from the Counting suite: pick and place a colored cube $N$ times, then press the stop button. Episodes run up to 1{,}300 steps (seed 7); single-memory policies are evaluated at training step 79{,}999, dual variants at the end of their adapter fine-tuning (Section~\ref{sec:method-training}).
+
+\textbf{Evaluation protocol.} Our evaluation is deliberately two-staged. \emph{Stage one} runs the single-representation baselines over full episode sets---20 episodes for symbolic-QwenVL and perceptual, 10 for symbolic-oracle---to establish overall performance and, more importantly, to \emph{identify the failure episodes}. \emph{Stage two} then evaluates the dual-memory variants \textbf{diagnostically on exactly those failure episodes} (2, 3, and 12, with stage timeouts tightened to 96/96/64 steps for pick/place/stop), asking not ``what is the average success rate?'' but ``does the dual design fix the specific failures that motivated it?'' This protocol matches the project's goal---understanding the failure structure---at the cost of not providing a full-distribution comparison for the dual variants, a limitation we return to in Section~\ref{sec:conclusion}.
 
 \begin{figure}[t]
   \centering
@@ -186,62 +169,65 @@ These controllers fix symbolic errors \emph{symbolically}---by asking a VLM to d
 
 \textbf{Compared configurations.} We evaluate three groups:
 \begin{enumerate}
-  \item \emph{Single-representation baselines}: the $\pi_{0.5}$ backbone without memory; symbolic GroundSG with subgoals from the fine-tuned QwenVL (realistic) and from the simulator state (oracle upper bound); perceptual FrameSamp+Modul.
-  \item \emph{Dual-memory variants}: the merged dual model with modulation only (\emph{dual-lite}), the gated model (\emph{dual-correction}), and the gated model trained with stale-subgoal augmentation (\emph{dual-correction+stale}); each evaluated with QwenVL and with oracle subgoals.
+  \item \emph{Single-representation baselines} (full episode sets): symbolic GroundSG with subgoals from the fine-tuned QwenVL (realistic) and from the simulator state (oracle upper bound); perceptual FrameSamp+Modul. A no-memory $\pi_{0.5}$ baseline was not re-run in our workspace; RoboMME reports 28.8\% for it on the Counting suite.
+  \item \emph{Dual-memory variants} (failure-episode diagnostics): the merged gated model (\emph{dual-merged-gated}, 500 adapter steps) and the gated model trained with stale-subgoal augmentation (\emph{dual-correction-stale}, 500 steps), evaluated with oracle subgoals, with the raw QwenVL predictor, and with the QwenVL fallback controller.
   \item \emph{VLM-verification controllers}: the progress-verification and stuck-fallback controllers of Section~\ref{sec:method-controllers} applied at inference time.
 \end{enumerate}
 
-\textbf{Training details.} Dual-lite trains for 2{,}000 steps and dual-correction for 500 steps, batch size 1, on a single GPU, updating only \texttt{mem\_attn}, \texttt{mem\_rms\_norm}, and \texttt{mem\_correction\_gate} parameters. The stale augmentation replaces the current subgoal with an earlier-episode subgoal with probability \tbd{stale\_prob} and adds coordinate noise to grounding.
-
-\begin{figure}[t]
-  \centering
-  \figslot{10em}{Screenshot slot — \textbf{training curves}: W\&B loss curves comparing $\pi_{0.5}$ baseline, GroundSG, and FrameSamp+Modul over 80k steps (the file \texttt{figs/wandb.png} from the repo can be used directly), optionally with the dual fine-tuning loss inset.}
-  \caption{Fine-tuning loss for the single-representation parents used to initialize the dual model. FrameSamp+Modul converges to the lowest training loss ($\approx$1.5e-3), GroundSG and the baseline slightly higher; other MME-VLA variants behave similarly. \tbd{confirm final loss values from your W\&B run}}
-  \label{fig:curves}
-\end{figure}
+\textbf{Training details.} Dual fine-tuning runs for 500 steps with batch size 1 on a single GPU, updating only \texttt{mem\_attn}, \texttt{mem\_rms\_norm}, and \texttt{mem\_correction\_gate}; the perceptual encoder and the VLA backbone stay frozen. The stale augmentation replaces the current subgoal with an earlier subgoal from the same episode with probability $0.35$ (repeating the immediately previous one with probability $0.15$, lookback bounded at 96 steps) and jitters grounded coordinates with Gaussian noise.
 
 \subsection{Quantitative results}
 \label{sec:exp-results}
 
-Table~\ref{tab:results} reports success rates over 20 PickXTimes episodes. For context, the RoboMME paper reports (over its full protocol) Counting-suite success of 28.8\% for the no-memory $\pi_{0.5}$, 38.0\% for realistic symbolic GroundSG/QwenVL, 65.2\% for perceptual FrameSamp+Modul, and 83.9\% for symbolic memory with \emph{oracle} subgoals---a 46-point gap attributable purely to VLM counting errors, which bounds the headroom any correction mechanism can recover.
+\textbf{Stage one: single-memory baselines.} Table~\ref{tab:results} reports full-episode results. Symbolic memory with QwenVL subgoals succeeds on 17 of 20 episodes (85\%), its oracle version on 9 of 10 (90\%), and perceptual memory on 15 of 20 (75\%).
 
 \begin{table}[t]
   \centering
-  \caption{PickXTimes success over 20 evaluation episodes (seed 7, checkpoint 79{,}999, max 1{,}300 steps). Oracle rows use simulator-state subgoals and serve as upper bounds. \tbd{fill all cells; mark any configuration you did not run as ``--''}}
+  \caption{PickXTimes results for the single-memory baselines (seed 7, checkpoint 79{,}999, max 1{,}300 steps). Failure episodes are listed explicitly because they define the targets for the dual-memory diagnostics.}
   \label{tab:results}
   \small
-  \begin{tabular}{llcc}
+  \begin{tabular}{llccc}
     \toprule
-    Group & Configuration & Subgoal source & Success / 20 \\
+    Configuration & Subgoal source & Episodes & Success rate & Failed episodes \\
     \midrule
-    Baseline & $\pi_{0.5}$ (no memory) & --- & \tbd{x/20} \\
-    Symbolic & GroundSG & QwenVL & \tbd{x/20} \\
-    Symbolic & GroundSG & oracle & \tbd{x/20} \\
-    Perceptual & FrameSamp+Modul & --- & \tbd{x/20} \\
-    \midrule
-    Dual & dual-lite (merged, modulation) & QwenVL & \tbd{x/20} \\
-    Dual & dual-correction (gated) & QwenVL & \tbd{x/20} \\
-    Dual & dual-correction + stale aug. & QwenVL & \tbd{x/20} \\
-    Dual & dual-correction + stale aug. & oracle & \tbd{x/20} \\
-    \midrule
-    Controller & progress verification (2$\times$ VLM) & QwenVL & \tbd{x/20} \\
-    Controller & stuck-fallback (1$\times$ VLM + revision) & QwenVL & \tbd{x/20} \\
+    Symbolic (GroundSG) & QwenVL & 20 & 85.0\% (17/20) & 2, 3, 12 \\
+    Symbolic (GroundSG) & oracle & 10 & 90.0\% (9/10) & 2 \\
+    Perceptual (FrameSamp+Modul) & --- & 20 & 75.0\% (15/20) & 0, 3, 6, 11, 12 \\
     \bottomrule
   \end{tabular}
 \end{table}
 
-We emphasize that with 20 episodes per configuration these numbers carry wide confidence intervals; we therefore treat them as directional evidence and base our conclusions primarily on the rollout-level analysis below.
+Two observations follow. First, on these sampled episodes the \emph{symbolic} pathway outperforms the perceptual one---the opposite of RoboMME's suite-level trend (38.0\% vs.\ 65.2\% over the full Counting protocol). We attribute this to the small sample, the single task, and a well-fine-tuned QwenVL predictor that is correct on most episodes; the comparison underscores how wide the confidence intervals are at $n{=}20$ and why we lean on rollout-level analysis rather than averages. Second, and more useful: the QwenVL errors are \emph{concentrated}---episodes 2, 3, and 12 account for every symbolic failure, and two of them (3, 12) also defeat perceptual memory. These three episodes become the diagnostic targets for the dual design.
+
+\textbf{Stage two: dual-memory diagnostics.} Table~\ref{tab:dualresults} evaluates the dual variants on exactly the failure episodes. The headline outcomes: dual-correction-stale with QwenVL \emph{fixes episode 2} (which even oracle symbolic memory fails); episode 3 resists every variant---the symbolic sequence reaches the stop stage but low-level execution fails; and on episode 12 the perceptual-verifier controller is the only configuration that behaves correctly, holding the current stage when recent frames show the pick is incomplete, where a hard timeout would advance the count prematurely.
+
+\begin{table}[t]
+  \centering
+  \caption{Dual-memory diagnostic results on the identified failure episodes. These runs probe whether the dual design fixes the known QwenVL failure modes; they are not a full-distribution benchmark.}
+  \label{tab:dualresults}
+  \small
+  \begin{tabular}{llcc}
+    \toprule
+    Configuration & Subgoal source & Episodes tested & Outcome \\
+    \midrule
+    dual-merged-gated-500 & oracle & 2, 3, 12 & 2/3 (failed 2) \\
+    dual-merged-gated-500 & QwenVL + progress ctrl. & 2, 3, 12 & 1/3 (failed 3, 12) \\
+    dual-correction-stale-500 & QwenVL & 2, 3 & 1/2 (\textbf{fixed 2}, failed 3) \\
+    dual-correction-stale-500 & QwenVL + fallback & 2, 3 & 1/2 (\textbf{fixed 2}, failed 3) \\
+    \bottomrule
+  \end{tabular}
+\end{table}
 
 \subsection{Case studies: how the symbolic pathway fails}
 \label{sec:exp-cases}
 
 Three episodes from the 20-episode QwenVL evaluation illustrate the failure structure that motivated, and partially validates, the dual design.
 
-\textbf{Episode 12: stale-subgoal repetition (core failure).} Midway through the episode the QwenVL predictor begins re-emitting a subgoal corresponding to a stage completed several steps earlier---the visual scene after each placement is similar enough that the VLM cannot tell the second repetition from the third. A policy that trusts the subgoal verbatim re-executes the completed stage and either loops or mis-times the stop. This is not an occasional hallucination but a \emph{systematic} bias: when frames are near-duplicates, the cheapest explanation for the VLM is the one it gave last time. Our stale-subgoal augmentation is a direct simulation of this mode.
+\textbf{Episode 12: stale-subgoal repetition (core failure).} Midway through the episode the QwenVL predictor begins re-emitting a stale first-pick or repeated-pick subgoal---a stage completed several steps earlier. The visual scene after each placement is similar enough that the VLM cannot tell the second repetition from the third; a policy that trusts the subgoal verbatim re-executes the completed stage and mis-times the stop. This is not an occasional hallucination but a \emph{systematic} bias: when frames are near-duplicates, the cheapest explanation for the VLM is the one it gave last time. Two remedies behave very differently. A \emph{hard timeout} controller can force the symbolic sequence forward, but the advance can be premature---it fixes staleness by introducing the opposite error. The \emph{perceptual verifier}, in contrast, correctly held the current stage when recent frames showed the pick was not yet visually complete, advancing only on visual evidence. This contrast is the clearest single piece of evidence in the project that perceptual information is useful \emph{as a progress verifier}, not as another text prompt. Our stale-subgoal augmentation is a direct simulation of this failure mode.
 
-\textbf{Episode 2: corrected by the dual pathway.} The same class of symbolic error occurs, but the gated dual policy does not follow it: with perceptual memory holding evidence of the completed placement, the correction gate attenuates the conflicting modulation and the policy proceeds to the next true stage. This is the intended behavior of Eq.~\eqref{eq:gate} and evidence that latent correction is learnable from augmented data alone.
+\textbf{Episode 2: fixed by latent correction---where even the oracle fails.} Episode 2 defeats not only QwenVL subgoals but also \emph{oracle} symbolic memory (Table~\ref{tab:results}), so the error cannot be blamed on subgoal quality alone. The dual-correction-stale policy fixes it: with perceptual memory holding evidence of the true progress, the correction gate attenuates the conflicting modulation and the policy proceeds through the correct stage sequence. This is the intended behavior of Eq.~\eqref{eq:gate}, learned purely from augmented data, and it shows latent correction can repair failures that better subgoals cannot.
 
-\textbf{Episode 3: correction is not execution.} The dual policy tracks all stages correctly to the final stage and then fails during low-level execution of the last placement. Counting and acting remain separate competencies; memory repairs the former, not the latter. This caps achievable success regardless of how good the count is, consistent with the gap between oracle-subgoal performance and the human level reported by RoboMME.
+\textbf{Episode 3: correction is not execution.} Across every variant, the symbolic sequence can be pushed all the way to the stop stage, yet the rollout still fails---the breakdown is in low-level execution of the final manipulation, not in the count. Counting and acting remain separate competencies; memory repairs the former, not the latter. This caps achievable success regardless of how good the count is, consistent with the gap between oracle-subgoal performance and the human level reported by RoboMME.
 
 \begin{figure}[t]
   \centering
@@ -259,7 +245,7 @@ The purpose of this project was less to maximize a success rate than to understa
 
 \textbf{Finding 2: perceptual memory is a verification layer, not a replacement.} Used alone, perceptual memory must squeeze the count out of near-duplicate frames; used \emph{against} the symbolic pathway, it only needs to answer the much easier question ``does the visual history contradict this subgoal?'' Detecting that a placement already happened is visually simple (the gripper opened over the target; the cube returned), whereas inferring the absolute count is not. This asymmetry---verification is easier than estimation---is, we believe, the most reusable lesson of the project and the principled reason the dual design should beat both parents.
 
-\textbf{Finding 3: VLM-based verification works but does not scale.} The progress-verification controller, which double-checks every subgoal with a second VLM call over recent frames, is effective at catching stage regressions---and roughly doubles the per-step VLM cost, on top of a symbolic pathway that is already the system's latency bottleneck (RoboMME measures GroundSG-style inference at roughly $3\times$ the backbone's compute). The stuck-fallback controller recovers most of the benefit at a fraction of the calls by verifying only on anomaly triggers, and the learned correction gate goes further by amortizing verification into a single linear layer per block with zero extra calls. The trajectory across these three designs---verify always, verify on trigger, verify in latent space---is the cost--reliability trade-off we expect future systems to navigate.
+\textbf{Finding 3: VLM-based verification works but does not scale.} The progress-verification controller, which double-checks every subgoal with a second VLM call over recent frames, is effective at catching stage regressions---and roughly doubles the per-step VLM cost, on top of a symbolic pathway that is already the system's latency bottleneck (RoboMME measures GroundSG-style inference at roughly $3\times$ the backbone's compute). In practice the overhead was severe enough that we could not afford full-distribution evaluation with the verifier enabled---a concrete, if mundane, demonstration of the problem. The stuck-fallback controller recovers most of the benefit at a fraction of the calls by verifying only on anomaly triggers, and the learned correction gate goes further by amortizing verification into a single linear layer per block with zero extra calls. The trajectory across these three designs---verify always, verify on trigger, verify in latent space---is the cost--reliability trade-off we expect future systems to navigate.
 
 %===============================================================================
 \section{Conclusion}
@@ -267,7 +253,7 @@ The purpose of this project was less to maximize a success rate than to understa
 
 We presented a dual-memory VLA policy for long-horizon counting manipulation that combines symbolic subgoals and perceptual frame memory on the RoboMME benchmark, with a token-wise correction gate and a stale-subgoal augmentation that together let perceptual evidence override unreliable VLM-written subgoals. Beyond the architecture, our experiments yield a clear picture of the underlying problem: VLM subgoals fail by drifting into stale repetition; perceptual memory is most valuable as a cheap verification signal layered on an explicit symbolic state; and the cost of verification---always, on trigger, or amortized into the policy---is the axis along which such systems should be compared.
 
-\textbf{Limitations.} Our evaluation covers a single task (PickXTimes) with 20 episodes per configuration, which bounds statistical power; conclusions are supported primarily by rollout-level analysis. The correction gate was trained against \emph{simulated} staleness, and although the simulation was designed from observed QwenVL behavior, the match between augmented and real failure distributions is not guaranteed. All results are in simulation on one embodiment.
+\textbf{Limitations.} Our evaluation covers a single task (PickXTimes); the baselines use 20 (or 10, for oracle) episodes, and the dual variants were evaluated \emph{only on the identified failure episodes}, so we report no full-distribution success rate for the dual design and cannot rule out regressions on episodes the baselines already solve. On our sampled episodes the symbolic baseline outperformed the perceptual one, opposite to RoboMME's suite-level trend---a reminder of how wide the confidence intervals are at this scale. The correction gate was trained against \emph{simulated} staleness, and although the simulation was designed from observed QwenVL behavior, the match between augmented and real failure distributions is not guaranteed. All results are in simulation on one embodiment.
 
 \textbf{Future work.} The natural next step is to replace VLM-based verification entirely with a \emph{lightweight learned verifier}: a small head over perceptual memory that scores subgoal consistency, trained with the same stale augmentation, and used both to gate the policy (as here) and to decide when re-querying the VLM is worth its cost. Extending the dual design beyond Counting to RoboMME's Permanence, Reference, and Imitation suites would test whether ``verification is easier than estimation'' holds for spatial and procedural memory as well.
 
