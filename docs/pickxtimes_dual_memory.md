@@ -86,18 +86,80 @@ XLA_PYTHON_CLIENT_MEM_FRACTION=0.62 MAX_EPISODES_PER_TASK=20 COUNTING_TASKS=Pick
 
 ## Observed Results
 
-On the 20-episode PickXtimes QwenVL symbolic-memory run, the main failures were
+### 20-Episode PickXtimes Test
+
+The main 20-episode test used the official symbolic-grounded-subgoal checkpoint
+with QwenVL-generated grounded subgoals:
+
+```bash
+MAX_EPISODES_PER_TASK=20 COUNTING_TASKS=PickXtimes MODEL_TYPE=symbolic_groundedSG_oracle GPU_ID=0 PORT=8014 bash scripts/eval_counting_single_gpu.sh
+```
+
+The saved result was:
+
+```json
+{
+  "PickXtimes": {
+    "0": true,
+    "1": true,
+    "2": false,
+    "3": false,
+    "4": true,
+    "5": true,
+    "6": true,
+    "7": true,
+    "8": true,
+    "9": true,
+    "10": true,
+    "11": true,
+    "12": false,
+    "13": true,
+    "14": true,
+    "15": true,
+    "16": true,
+    "17": true,
+    "18": true,
+    "19": true
+  }
+}
+```
+
+Summary:
+
+| Setting | Episodes | Success | Failure | Failed Episodes |
+| --- | ---: | ---: | ---: | --- |
+| Symbolic grounded subgoal + QwenVL | 20 | 17 | 3 | `2`, `3`, `12` |
+| Symbolic grounded subgoal + oracle | 10 | 9 | 1 | `2` |
+| Perceptual frame-sampling modulation | 10 | 7 | 3 | `0`, `3`, `6` |
+
+This result established the target failure cases for the dual-memory work:
 episodes `2`, `3`, and `12`.
+
+### Dual-Memory Failure-Case Tests
 
 With the dual correction checkpoint and QwenVL fallback:
 
-- episode `2` was fixed
-- episode `3` reached the stop stage but still failed, likely due to low-level
-  execution
-- episode `12` exposed the key failure mode: QwenVL repeatedly produced a stale
-  pick subgoal. Hard timeout fallback can advance the symbolic stage, but may be
-  premature. The perceptual verifier correctly held the stage when the visual
-  evidence suggested the current pick was not complete.
+| Setting | Episodes Tested | Result | Notes |
+| --- | --- | --- | --- |
+| `dual-merged-gated-500` + oracle | `2`, `3`, `12` | 2/3 | Failed `2` |
+| `dual-merged-gated-500` + QwenVL progress controller | `2`, `3`, `12` | 1/3 | Failed `3`, `12` |
+| `dual-correction-stale-500` + QwenVL | `2`, `3` | 1/2 | Fixed `2`, failed `3` |
+| `dual-correction-stale-500` + QwenVL fallback | `2`, `3` | 1/2 | Fixed `2`, failed `3` |
+
+The failure-case tests were not intended as a full benchmark; they were used to
+diagnose whether the dual-memory design can fix the known QwenVL failure modes.
+
+Detailed observations:
+
+- Episode `2`: fixed by the dual correction checkpoint with QwenVL fallback.
+- Episode `3`: the controller could push the symbolic sequence toward the stop
+  stage, but the rollout still failed, suggesting a low-level execution issue.
+- Episode `12`: QwenVL repeatedly produced a stale first-pick or repeated-pick
+  subgoal. A hard timeout controller can force the symbolic sequence forward,
+  but this can be premature. The perceptual verifier version correctly held the
+  current stage when recent frames suggested the current pick was not visually
+  complete. This is the clearest evidence that perceptual information is useful
+  as a progress verifier rather than as another text prompt.
 
 ## Current Conclusion
 
