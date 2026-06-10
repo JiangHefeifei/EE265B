@@ -135,6 +135,22 @@ Summary:
 This result established the target failure cases for the dual-memory work:
 episodes `2`, `3`, and `12`.
 
+### Baseline Results
+
+The current project uses the official single-memory models as baselines. A
+separate no-memory policy baseline has not been run yet in this workspace.
+
+| Baseline | Memory Type | Subgoal Source | Episodes | Success Rate | Failed Episodes |
+| --- | --- | --- | ---: | ---: | --- |
+| Perceptual-only | Perceptual frame-sampling memory | task prompt only | 10 | 70.0% | `0`, `3`, `6` |
+| Symbolic-only oracle | Symbolic grounded subgoal memory | simulator oracle | 10 | 90.0% | `2` |
+| Symbolic-only QwenVL | Symbolic grounded subgoal memory | Qwen3-VL | 20 | 85.0% | `2`, `3`, `12` |
+
+These baselines show two useful trends. First, symbolic memory is stronger than
+perceptual-only memory on the sampled PickXtimes episodes. Second, replacing the
+oracle symbolic memory with QwenVL introduces stale or incorrect subgoal errors,
+which motivates the dual-memory correction design.
+
 ### Dual-Memory Failure-Case Tests
 
 With the dual correction checkpoint and QwenVL fallback:
