@@ -217,3 +217,19 @@ The experiment supports the following interpretation:
 3. Extra VLM-based verification is too slow for full evaluation.
 4. A better final system would train a lightweight perceptual progress verifier
    from latent memory, replacing the extra QwenVL revision call.
+
+## Report Figures
+
+Generated report figures are stored in `docs/figures/`:
+
+- `fig_storyboard_pickxtimes.png`: successful PickXtimes storyboard from the
+  first pick to the final stop action.
+- `fig_case_comparison.png`: two-row case comparison. The upper row shows the
+  symbolic-QwenVL ep12 stale-subgoal failure, and the lower row shows the
+  dual-memory fallback ep2 correction case.
+- `fig_case_ep12.png`: upper row of the comparison figure only.
+- `fig_case_ep2.png`: lower row of the comparison figure only.
+
+The strips were generated with `tools/make_strips.py`, which extracts selected
+video frames, crops the rollout debug text area, and marks captions containing
+`stale` in red.
