@@ -160,8 +160,8 @@ Orthogonal to the learned gate, we implemented two inference-time controllers th
 
 \begin{figure}[t]
   \centering
-  \figslot{11em}{Screenshot slot — \textbf{PickXTimes rollout storyboard}: 6--8 frames from one successful episode (front camera), from first pick to pressing the stop button, with step indices. Alternative: the benchmark overview image \texttt{figs/robomme\_bench.jpg} already in the repo.}
-  \caption{The PickXTimes task. The robot must pick and place the cube $N$ times and then press the button to stop; scenes after each repetition are nearly identical, so progress must be carried by memory. \tbd{replace slot with rollout frames}}
+  \includegraphics[width=\linewidth]{figs/fig_storyboard_pickxtimes.png}
+  \caption{The PickXTimes task: a successful rollout from first pick ($t{=}60$) to pressing the stop button ($t{=}640$). The robot must pick and place the cube $N$ times and then stop; scenes after each repetition are nearly identical, so progress must be carried by memory.}
   \label{fig:task}
 \end{figure}
 
@@ -229,8 +229,8 @@ Three episodes from the 20-episode QwenVL evaluation illustrate the failure stru
 
 \begin{figure}[t]
   \centering
-  \figslot{11em}{Screenshot slot — \textbf{failure/correction case strips}: two rows of 4--5 frames each. Row 1 (episode 12): frames around the moment QwenVL repeats the stale subgoal; annotate the repeated subgoal text under the frames. Row 2 (episode 2): the same situation where the dual-correction policy ignores the stale subgoal and proceeds; annotate gate behavior if available.}
-  \caption{Case studies. Top: stale-subgoal repetition by the VLM predictor (episode 12). Bottom: the gated dual policy overriding a stale subgoal using perceptual evidence (episode 2). \tbd{replace slot with annotated frame strips}}
+  \includegraphics[width=\linewidth]{figs/fig_case_comparison.png}
+  \caption{Case studies. Top: stale-subgoal repetition by the QwenVL predictor on episode 12---the scene advances while the predicted subgoal remains \emph{pick1 (stale)} (red). Bottom: the dual-memory policy on episode 2 proceeding through the correct stage sequence to \emph{stop}.}
   \label{fig:cases}
 \end{figure}
 
